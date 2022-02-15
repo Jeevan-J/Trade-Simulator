@@ -1,5 +1,6 @@
 **__pycache__**
 data/trades.db
+data/trades.log
 poetry.lock
 
 .env

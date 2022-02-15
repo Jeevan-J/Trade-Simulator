@@ -37,8 +37,10 @@ class TradeBase(BaseModel):
         values["profit_roe"] = values["profit"] / values["initial_margin"]
         values["loss_roe"] = values["loss"] / values["initial_margin"]
         values["risk_reward_ratio"] = abs(values["profit"]/values["loss"])
-        values["created_at"] = datetime.now()
-        values["trade_status"] = "Waiting"
+        if (values.get("created_at") == None) or (values.get("created_at") == ""):
+            values["created_at"] = datetime.now()
+        if (values.get("trade_status") == None) or (values.get("trade_status") == ""):
+            values["trade_status"] = "Waiting"
         return values
         
 class TradeCreate(TradeBase):

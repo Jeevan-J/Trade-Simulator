@@ -1,11 +1,14 @@
 from typing import List
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy.orm import Session
 from binance import Client
 from dotenv import load_dotenv
-import os, uuid
+import os, uuid, time
 from fastapi_utils.tasks import repeat_every
+import logging
+from sse_starlette.sse import EventSourceResponse
+from sh import tail
 
 from . import crud, models, schemas
 from .database import SessionLocal, engine
@@ -21,6 +24,11 @@ app = FastAPI()
 
 bclient = Client(bapi_key, bapi_secret)
 
+# setup loggers
+logging.config.fileConfig('api/logging.conf', defaults={'logfilename': 'data/trades.log'}, disable_existing_loggers=False)
+# get root logger
+logger = logging.getLogger("tradeSimulator")
+
 # Dependency
 def get_db():
     db = SessionLocal()
@@ -29,62 +37,78 @@ def get_db():
     finally:
         db.close()
 
-ACTIVE_TRADES = dict({})
-
-@app.post("/trades/", response_model=schemas.TradeCreate)
-async def create_trade(trade: schemas.TradeCreate):
-    global ACTIVE_TRADES
-    ACTIVE_TRADES[str(uuid.uuid4())]=trade
+@app.post("/trades/", response_model=schemas.Trade)
+async def create_trade(trade: schemas.TradeCreate, db: Session = Depends(get_db)):
+    trade = crud.create_trade(db, trade)
     return trade
 
-@app.get("/active_trades", response_model=List[schemas.TradeCreate])
-async def get_active_trades():
-    # global ACTIVE_TRADES
-    active_trades = json.loads(open("data/active_trades.json","r").read())
-    return list(active_trades.values())
+@app.get("/active_trades", response_model=List[schemas.Trade])
+async def get_active_trades(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    active_trades = crud.get_active_trades(db, skip=skip, limit=limit)
+    return active_trades
 
 @app.get("/closed_trades", response_model=List[schemas.Trade])
 async def get_closed_trades(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return crud.get_trades(db, skip=skip, limit=limit)
+    trades = crud.get_trades(db, skip=skip, limit=limit)
+    return trades
+
+async def logGenerator(request):
+    LOGFILE = "data/trades.log"
+    for line in tail("-f", LOGFILE, _iter=True):
+        if await request.is_disconnected():
+            print("client disconnected!!!")
+            break
+        yield line
+        time.sleep(0.5)
+
+# @app.get("/logstream")
+# async def logstream(request: Request):
+#     event_generator = logGenerator(request)
+#     return EventSourceResponse(event_generator)
 
 @app.on_event("startup")
 @repeat_every(seconds=5)
 async def check_trades() -> None:
-    global bclient, ACTIVE_TRADES
-    db = get_db()
+    global bclient
+    db = SessionLocal()
     try:
-        for active_trade_id in list(ACTIVE_TRADES.keys()):
-            active_trade = ACTIVE_TRADES[active_trade_id]
+        ACTIVE_TRADES = crud.get_active_trades(db)
+        for active_trade in ACTIVE_TRADES:
             res = bclient.get_symbol_ticker(symbol=active_trade.trade_symbol)
-            print(active_trade.trade_status,"::",active_trade.entry_price, "::", float(res['price']))
+            trade_updated = False
             if active_trade.trade_status == "Waiting":
                 if (active_trade.trade_type == "Long") and (active_trade.entry_price < float(res['price'])):
-                    ACTIVE_TRADES[active_trade_id].trade_status = "Opened"
-                    print("Opened a trade")
+                    active_trade.trade_status = "Opened"
+                    trade_updated = True
+                    logger.info(str(active_trade.id)+" :: Opened a trade")
                 elif (active_trade.trade_type == "Short") and (active_trade.entry_price > float(res['price'])):
-                    ACTIVE_TRADES[active_trade_id].trade_status = "Opened"
-                    print("Opened a trade")
+                    active_trade.trade_status = "Opened"
+                    trade_updated = True
+                    logger.info(str(active_trade.id)+" :: Opened a trade")
                 pass
-            elif active_trade.trade_status == "Opened":
-                trade_completed = False
+            if active_trade.trade_status == "Opened":
                 if (active_trade.trade_type == "Long"):
                     if (active_trade.target < float(res['price'])):
-                        ACTIVE_TRADES[active_trade_id].trade_status = "Success"
-                        trade_completed = True
+                        active_trade.trade_status = "Success"
+                        logger.info(str(active_trade.id)+" :: Closed a trade")
+                        trade_updated = True
                     elif (active_trade.stop_loss > float(res['price'])):
-                        ACTIVE_TRADES[active_trade_id].trade_status = "Failed"
-                        trade_completed = True
+                        active_trade.trade_status = "Failed"
+                        logger.info(str(active_trade.id)+" :: Closed a trade")
+                        trade_updated = True
                 elif (active_trade.trade_type == "Short"):
                     if (active_trade.target > float(res['price'])):
-                        ACTIVE_TRADES[active_trade_id].trade_status = "Success"
-                        trade_completed = True
+                        active_trade.trade_status = "Success"
+                        logger.info(str(active_trade.id)+" :: Closed a trade")
+                        trade_updated = True
                     elif (active_trade.stop_loss < float(res['price'])):
-                        ACTIVE_TRADES[active_trade_id].trade_status = "Failed"
-                        trade_completed = True
-                if trade_completed:
-                    print("Closed a trade")
-                    ACTIVE_TRADES.pop(active_trade_id)
-                    crud.create_trade(db, active_trade)
-                pass
+                        active_trade.trade_status = "Failed"
+                        logger.info(str(active_trade.id)+" :: Closed a trade")
+                        trade_updated = True
+            if trade_updated:
+                crud.update_trade(db, active_trade)
+            pass
     except Exception as e:
         print(str(e))
+        logger.error(str(e))
+    db.close()
