@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "trade-simulator"
+version = "0.1.0"
+description = "A simple python app to track trades and simluate orders using API real-time data."
+authors = ["Jeevan Jamakayala"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+fastapi = "^0.73.0"
+SQLAlchemy = "^1.4.31"
+requests = "^2.27.1"
+python-binance = "^1.0.15"
+fastapi-utils = "^0.2.1"
+aiofiles = "^0.8.0"
+uvicorn = "^0.17.4"
+python-dotenv = "^0.19.2"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
